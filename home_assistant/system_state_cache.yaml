@@ -1,0 +1,31 @@
+template:
+  - sensor:
+      - name: "System State Cache"
+        unique_id: system_state_cache
+        state: "ready"
+        attributes:
+          weather_text: "{{ states('weather.gentbrugge') }}"
+          weather_temp: "{{ state_attr('weather.gentbrugge', 'temperature') | float(0) }}"
+          living_temp: "{{ states('sensor.anna_temperature') | float(0) }}"
+          living_humidity: "{{ states('sensor.downstairs_humidity') | float(0) }}"
+          power_now: "{{ states('sensor.p1_meter_active_power') | float(0) }}"
+          solar_now: "{{ states('sensor.solaredge_current_power') | float(0) }}"
+          gate_open: "{{ states('input_boolean.poort_open') }}"
+          lights_on: >
+            {{ [
+              states('light.kelder'),
+              states('light.leeslamp'),
+              states('light.balken'),
+              states('light.trap'),
+              states('light.dimmer_vibia'),
+              states('light.woonkamer'),
+              states('light.keuken'),
+              states('light.led_strip_keuken'),
+              states('light.bureau'),
+              states('light.bergplaats'),
+              states('light.tuinhuis'),
+              states('light.inkom'),
+              states('light.toilet'),
+              states('light.spot_terras_schuifdeur'),
+              states('light.voordeur')
+            ] | select('equalto', 'on') | list | count }}

@@ -1,0 +1,60 @@
+substitutions:
+  name: papa-bringup
+  friendly_name: Papa Bringup
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  project:
+    name: papaproject.bringup
+    version: "0.1.0"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  reboot_timeout: 0s
+  ap:
+    ap_timeout: 15s
+    ssid: "Papa Dashboard Setup"
+    password: "verjaardag123"
+
+captive_portal:
+  compression: gzip
+
+improv_serial:
+
+web_server:
+  port: 80
+
+button:
+  - platform: restart
+    name: "${friendly_name} Herstart"
+  - platform: factory_reset
+    name: "${friendly_name} Fabrieksreset"
+
+sensor:
+  - platform: uptime
+    name: "${friendly_name} Uptime"
+  - platform: wifi_signal
+    name: "${friendly_name} WiFi"
+    update_interval: 30s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "${friendly_name} IP"
+    ssid:
+      name: "${friendly_name} SSID"
+    bssid:
+      name: "${friendly_name} BSSID"
+    mac_address:
+      name: "${friendly_name} MAC"

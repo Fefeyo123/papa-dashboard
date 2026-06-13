@@ -1,0 +1,952 @@
+substitutions:
+  name: papa-dashboard
+  friendly_name: Papa Dashboard
+  room_label: BINNEN
+  display_model: 7.50inV2p-grayexp
+  timezone: Europe/Brussels
+  ha_base_url: https://nitramhome.eu
+  entity_state_cache: sensor.system_state_cache
+  fallback_ap_ssid: Papa Dashboard Setup
+  fallback_ap_password: verjaardag123
+  fallback_ap_join_qr: WIFI:T:WPA;S:Papa Dashboard Setup;P:verjaardag123;;
+  fallback_portal_url: http://192.168.4.1/
+  fact_api_url: https://uselessfacts.jsph.pl/api/v2/facts/random?language=en
+  font_inclusive_path: fonts/InclusiveSans-Medium.ttf
+  font_icons_path: fonts/fa-solid-900.ttf
+
+  pin_clk: GPIO13
+  pin_mosi: GPIO14
+  pin_cs: GPIO15
+  pin_dc: GPIO27
+  pin_reset: GPIO26
+  pin_busy: GPIO25
+  pin_i2c_sda: GPIO21
+  pin_i2c_scl: GPIO22
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  project:
+    name: papaproject.eink_dashboard
+    version: "0.6.0"
+  on_boot:
+    priority: -10
+    then:
+      - deep_sleep.prevent: battery_sleep
+      - lambda: |-
+          auto cause = esp_sleep_get_wakeup_cause();
+          id(boot_from_deep_sleep) = cause != ESP_SLEEP_WAKEUP_UNDEFINED;
+          id(wifi_setup_screen_active) = false;
+          id(loading_screen_active) = !id(boot_from_deep_sleep);
+      - if:
+          condition:
+            lambda: return !id(boot_from_deep_sleep);
+          then:
+            - script.execute: show_startup_screen_after_boot
+            - script.execute: cold_boot_to_wifi_help
+          else:
+            - script.execute: wake_to_wifi_help
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    sdkconfig_options:
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "12"
+
+logger:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  id: wifi_main
+  fast_connect: true
+  power_save_mode: light
+  reboot_timeout: 0s
+  ap:
+    ap_timeout: 15s
+    ssid: ${fallback_ap_ssid}
+    password: ${fallback_ap_password}
+  on_connect:
+    then:
+      - script.execute: startup_refresh_and_sleep
+
+captive_portal:
+  compression: gzip
+
+improv_serial:
+
+time:
+  - platform: sntp
+    id: ntp_time
+    timezone: ${timezone}
+    on_time:
+      - seconds: 0
+        minutes: /15
+        then:
+          - if:
+              condition:
+                wifi.connected:
+              then:
+                - logger.log:
+                    level: INFO
+                    format: "Geplande refresh op kwartier"
+                - script.execute: fetch_dashboard_data
+              else:
+                - logger.log:
+                    level: WARN
+                    format: "Geplande refresh overgeslagen: geen wifi"
+
+# Hardware helpers
+spi:
+  clk_pin: ${pin_clk}
+  mosi_pin: ${pin_mosi}
+
+i2c:
+  id: i2c_battery_gauge
+  sda: ${pin_i2c_sda}
+  scl: ${pin_i2c_scl}
+  scan: true
+
+external_components:
+  - source:
+      type: local
+      path: external_components/grayscale_waveshare/components
+    components: [waveshare_epaper]
+
+json:
+
+http_request:
+  timeout: 10s
+  follow_redirects: true
+
+qr_code:
+  - id: setup_wifi_qr
+    value: ${fallback_ap_join_qr}
+    ecc: QUARTILE
+  - id: setup_portal_qr
+    value: ${fallback_portal_url}
+    ecc: QUARTILE
+
+globals:
+  - id: state_cache_loaded
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: loading_screen_active
+    type: bool
+    restore_value: no
+    initial_value: "true"
+  - id: wifi_setup_screen_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: boot_from_deep_sleep
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: startup_waiting_for_time
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: fact_refresh_day_key
+    type: int
+    restore_value: yes
+    initial_value: "-1"
+  - id: fact_cache_version
+    type: int
+    restore_value: yes
+    initial_value: "0"
+  - id: fact_text_cache
+    type: std::string
+    restore_value: yes
+    max_restore_data_length: 192
+    initial_value: '"Even nieuw feitje halen..."'
+
+font:
+  - file: ${font_inclusive_path}
+    id: font_label
+    size: 15
+    bpp: 1
+    glyphsets:
+      - GF_Latin_Core
+    glyphs:
+      - "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      - ' .,:%+-/()''";!?&'
+      - "àáâäèéêëìíîïòóôöùúûüç"
+      - "ÀÁÂÄÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜÇ"
+      - "°"
+  - file: ${font_inclusive_path}
+    id: font_fact
+    size: 12
+    bpp: 1
+    glyphsets:
+      - GF_Latin_Core
+    glyphs:
+      - "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      - ' .,:%+-/()''";!?&'
+      - "àáâäèéêëìíîïòóôöùúûüç"
+      - "ÀÁÂÄÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜÇ"
+      - "°"
+  - file: ${font_inclusive_path}
+    id: font_small
+    size: 18
+    bpp: 1
+    glyphsets:
+      - GF_Latin_Core
+    glyphs:
+      - "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      - ' .,:%+-/()''";!?&'
+      - "àáâäèéêëìíîïòóôöùúûüç"
+      - "ÀÁÂÄÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜÇ"
+      - "°"
+  - file: ${font_inclusive_path}
+    id: font_medium
+    size: 28
+    bpp: 1
+    glyphsets:
+      - GF_Latin_Core
+    glyphs:
+      - "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      - ' .,:%+-/()''";!?&'
+      - "àáâäèéêëìíîïòóôöùúûüç"
+      - "ÀÁÂÄÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜÇ"
+      - "°"
+  - file: ${font_inclusive_path}
+    id: font_large
+    size: 44
+    bpp: 1
+    glyphsets:
+      - GF_Latin_Core
+    glyphs:
+      - "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      - ' .,:%+-/()''";!?&'
+      - "àáâäèéêëìíîïòóôöùúûüç"
+      - "ÀÁÂÄÈÉÊËÌÍÎÏÒÓÔÖÙÚÛÜÇ"
+      - "°"
+  - file: ${font_inclusive_path}
+    id: font_time
+    size: 48
+    bpp: 1
+    glyphs:
+      - "0123456789:"
+  - file: ${font_icons_path}
+    id: font_icon_label
+    size: 17
+    bpp: 1
+    glyphs:
+      - "\U0000F0C2" # cloud
+      - "\U0000F2C9" # thermometer-half
+      - "\U0000F52B" # door-open
+      - "\U0000F0E7" # bolt
+      - "\U0000F0EB" # lightbulb
+      - "\U0000F185" # sun
+      - "\U0000F043" # droplet
+      - "\U0000F073" # calendar
+  - file: ${font_icons_path}
+    id: font_icon_meta
+    size: 15
+    bpp: 1
+    glyphs:
+      - "\U0000F0E7" # bolt
+      - "\U0000F185" # sun
+      - "\U0000F043" # droplet
+      - "\U0000F073" # calendar
+
+sensor:
+  - platform: max17043
+    id: battery_gauge
+    i2c_id: i2c_battery_gauge
+    update_interval: 60s
+    battery_voltage:
+      name: "${friendly_name} Batterijspanning"
+      id: battery_voltage
+      accuracy_decimals: 2
+    battery_level:
+      name: "${friendly_name} Batterij"
+      id: battery_level
+      accuracy_decimals: 0
+      filters:
+        - lambda: |-
+            if (std::isnan(x)) return x;
+            if (x < 0.0f) return 0.0f;
+            if (x > 100.0f) return 100.0f;
+            return x;
+  - platform: template
+    name: "${friendly_name} Weather Temp Cache"
+    id: weather_temp
+    internal: true
+    update_interval: never
+  - platform: template
+    name: "${friendly_name} Living Temp Cache"
+    id: living_temp
+    internal: true
+    update_interval: never
+  - platform: template
+    name: "${friendly_name} Living Humidity Cache"
+    id: living_humidity
+    internal: true
+    update_interval: never
+  - platform: template
+    name: "${friendly_name} Power Cache"
+    id: power_now
+    internal: true
+    update_interval: never
+  - platform: template
+    name: "${friendly_name} Solar Cache"
+    id: solar_now
+    internal: true
+    update_interval: never
+  - platform: template
+    name: "${friendly_name} Lights Cache"
+    id: lights_on
+    internal: true
+    update_interval: never
+  - platform: wifi_signal
+    name: "${friendly_name} WiFi"
+    update_interval: 5min
+
+text_sensor:
+  - platform: template
+    name: "${friendly_name} Weather Text Cache"
+    id: weather_text
+    internal: true
+    update_interval: never
+  - platform: template
+    name: "${friendly_name} Gate State Cache"
+    id: gate_state
+    internal: true
+    update_interval: never
+
+script:
+  - id: show_startup_screen_after_boot
+    mode: restart
+    then:
+      - delay: 1s
+      - if:
+          condition:
+            lambda: return id(loading_screen_active) && !id(boot_from_deep_sleep);
+          then:
+            - script.execute: refresh_display
+  - id: refresh_display
+    mode: single
+    then:
+      - logger.log:
+          level: INFO
+          format: "Display refresh start"
+      - component.update: main_display
+      - logger.log:
+          level: INFO
+          format: "Display refresh klaar"
+  - id: startup_refresh_and_sleep
+    mode: restart
+    then:
+      - lambda: |-
+          id(startup_waiting_for_time) = true;
+          id(wifi_setup_screen_active) = false;
+      - logger.log:
+          level: INFO
+          format: "Wifi verbonden: data en tijd ophalen voor slaap"
+      - script.execute: fetch_dashboard_data
+      - script.wait: fetch_dashboard_data
+      - logger.log:
+          level: INFO
+          format: "Batterijmeter verversen voor finale refresh"
+      - component.update: battery_gauge
+      - if:
+          condition:
+            lambda: return std::isnan(id(battery_level).state) || std::isnan(id(battery_voltage).state);
+          then:
+            - delay: 500ms
+            - component.update: battery_gauge
+      - if:
+          condition:
+            lambda: return !id(ntp_time).now().is_valid();
+          then:
+            - logger.log:
+                level: INFO
+                format: "Wachten op SNTP tijd voor finale refresh"
+            - wait_until:
+                condition:
+                  lambda: return id(ntp_time).now().is_valid();
+                timeout: 30s
+      - if:
+          condition:
+            lambda: return id(ntp_time).now().is_valid();
+          then:
+            - logger.log:
+                level: INFO
+                format: "Tijd is binnen, finale refresh voor deep sleep"
+            - lambda: |-
+                id(startup_waiting_for_time) = false;
+                id(loading_screen_active) = false;
+            - script.execute: maybe_fetch_fact_of_day
+            - script.wait: maybe_fetch_fact_of_day
+            - script.execute: refresh_display
+            - script.wait: refresh_display
+          else:
+            - logger.log:
+                level: WARN
+                format: "Geen geldige tijd ontvangen, finale refresh zonder SNTP"
+            - lambda: |-
+                id(startup_waiting_for_time) = false;
+            - script.execute: refresh_display
+            - script.wait: refresh_display
+      - delay: 2s
+      - deep_sleep.allow: battery_sleep
+      - max17043.sleep_mode: battery_gauge
+      - deep_sleep.enter:
+          id: battery_sleep
+          sleep_duration: !lambda |-
+            auto now = id(ntp_time).now();
+            const uint32_t quarter_seconds = 15 * 60;
+            if (!now.is_valid()) {
+              ESP_LOGW("main", "Geen geldige tijd voor kwartierslaap, val terug op 15 minuten");
+              return quarter_seconds * 1000;
+            }
+            uint32_t elapsed_in_quarter = (now.minute % 15) * 60 + now.second;
+            uint32_t remaining_seconds = quarter_seconds - elapsed_in_quarter;
+            if (remaining_seconds == 0) {
+              remaining_seconds = quarter_seconds;
+            }
+            ESP_LOGI("main", "Slaap %u seconden tot volgend kwartier", remaining_seconds);
+            return remaining_seconds * 1000;
+  - id: cold_boot_to_wifi_help
+    mode: restart
+    then:
+      - delay: 60s
+      - if:
+          condition:
+            lambda: return id(loading_screen_active) && !id(wifi_main).is_connected();
+          then:
+            - logger.log:
+                level: INFO
+                format: "Geen wifi na koude boot: toon setup-QR scherm"
+            - lambda: |-
+                id(loading_screen_active) = false;
+                id(wifi_setup_screen_active) = true;
+            - script.execute: refresh_display
+  - id: wake_to_wifi_help
+    mode: restart
+    then:
+      - delay: 60s
+      - if:
+          condition:
+            lambda: return !id(loading_screen_active) && !id(wifi_main).is_connected() && !id(wifi_setup_screen_active);
+          then:
+            - logger.log:
+                level: INFO
+                format: "Geen wifi na wake uit deep sleep: toon setup-QR scherm"
+            - lambda: |-
+                id(wifi_setup_screen_active) = true;
+            - script.execute: refresh_display
+  - id: fetch_dashboard_data
+    mode: single
+    then:
+      - lambda: |-
+          id(state_cache_loaded) = false;
+          id(lights_on).publish_state(0);
+      - http_request.get:
+          url: ${ha_base_url}/api/states/${entity_state_cache}
+          request_headers:
+            Authorization: !secret ha_authorization
+            Content-Type: application/json
+          capture_response: true
+          max_response_buffer_size: 8192
+          on_response:
+            then:
+              - if:
+                  condition:
+                    lambda: return response->status_code == 200;
+                  then:
+                    - lambda: |-
+                        bool parsed = json::parse_json(body, [](JsonObject root) -> bool {
+                          if (!root["attributes"]) {
+                            return false;
+                          }
+
+                          JsonObject attributes = root["attributes"].as<JsonObject>();
+                          if (attributes.isNull()) {
+                            return false;
+                          }
+
+                          if (attributes["weather_text"]) {
+                            std::string state = attributes["weather_text"].as<std::string>();
+                            if (!state.empty() && state != "unknown" && state != "unavailable") {
+                              id(weather_text).publish_state(state);
+                            }
+                          }
+
+                          if (attributes["weather_temp"]) {
+                            id(weather_temp).publish_state(attributes["weather_temp"].as<float>());
+                          }
+                          if (attributes["living_temp"]) {
+                            id(living_temp).publish_state(attributes["living_temp"].as<float>());
+                          }
+                          if (attributes["living_humidity"]) {
+                            id(living_humidity).publish_state(attributes["living_humidity"].as<float>());
+                          }
+                          if (attributes["power_now"]) {
+                            id(power_now).publish_state(attributes["power_now"].as<float>());
+                          }
+                          if (attributes["solar_now"]) {
+                            id(solar_now).publish_state(attributes["solar_now"].as<float>());
+                          }
+                          if (attributes["lights_on"]) {
+                            id(lights_on).publish_state(attributes["lights_on"].as<float>());
+                          }
+                          if (attributes["gate_open"]) {
+                            std::string state = attributes["gate_open"].as<std::string>();
+                            if (!state.empty() && state != "unknown" && state != "unavailable") {
+                              id(gate_state).publish_state(state);
+                            }
+                          }
+
+                          id(loading_screen_active) = false;
+                          return true;
+                        });
+
+                        if (parsed) {
+                          id(state_cache_loaded) = true;
+                        } else {
+                          ESP_LOGW("cache", "Status cache JSON kon niet geparsed worden");
+                        }
+                  else:
+                    - logger.log:
+                        level: WARN
+                        format: "Status cache request failed: %d"
+                        args:
+                          - response->status_code
+      - if:
+          condition:
+            lambda: return id(state_cache_loaded);
+          then:
+            - if:
+                condition:
+                  lambda: return id(startup_waiting_for_time);
+                then:
+                  - logger.log:
+                      level: INFO
+                      format: "Status cache geladen, wacht nog op geldige tijd"
+                else:
+                  - logger.log:
+                      level: INFO
+                      format: "Status cache geladen via compacte REST-call"
+                  - script.execute: maybe_fetch_fact_of_day
+                  - script.wait: maybe_fetch_fact_of_day
+                  - script.execute: refresh_display
+          else:
+            - logger.log:
+                level: WARN
+                format: "Status cache niet beschikbaar; dashboard niet bijgewerkt"
+  - id: maybe_fetch_fact_of_day
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              auto now = id(ntp_time).now();
+              if (!now.is_valid()) {
+                return false;
+              }
+              int today_key = now.year * 10000 + now.month * 100 + now.day_of_month;
+              if (id(fact_refresh_day_key) == today_key && id(fact_cache_version) == 1 && !id(fact_text_cache).empty()) {
+                return false;
+              }
+              return true;
+          then:
+            - logger.log:
+                level: INFO
+                format: "Nieuw feitje van vandaag ophalen"
+            - http_request.get:
+                url: ${fact_api_url}
+                request_headers:
+                  Accept: application/json
+                capture_response: true
+                max_response_buffer_size: 2048
+                on_response:
+                  then:
+                    - if:
+                        condition:
+                          lambda: return response->status_code == 200;
+                        then:
+                          - lambda: |-
+                              bool parsed = json::parse_json(body, [](JsonObject root) -> bool {
+                                if (!root["text"]) {
+                                  return false;
+                                }
+                                std::string text = root["text"].as<std::string>();
+                                if (text.empty()) {
+                                  return false;
+                                }
+                                auto replace_all = [](std::string &haystack, const std::string &needle, const std::string &replacement) {
+                                  size_t pos = 0;
+                                  while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+                                    haystack.replace(pos, needle.length(), replacement);
+                                    pos += replacement.length();
+                                  }
+                                };
+                                replace_all(text, "\xE2\x80\x9C", "\"");
+                                replace_all(text, "\xE2\x80\x9D", "\"");
+                                replace_all(text, "\xE2\x80\x98", "'");
+                                replace_all(text, "\xE2\x80\x99", "'");
+                                replace_all(text, "\xE2\x80\x93", "-");
+                                replace_all(text, "\xE2\x80\x94", "-");
+                                id(fact_text_cache) = text;
+                                auto now = id(ntp_time).now();
+                                if (now.is_valid()) {
+                                  id(fact_refresh_day_key) = now.year * 10000 + now.month * 100 + now.day_of_month;
+                                }
+                                id(fact_cache_version) = 1;
+                                return true;
+                              });
+                              if (!parsed) {
+                                ESP_LOGW("fact", "Feitje van de dag JSON kon niet geparsed worden");
+                              }
+                        else:
+                          - logger.log:
+                              level: WARN
+                              format: "Feitje van de dag request failed: %d"
+                              args:
+                                - response->status_code
+
+button:
+  - platform: template
+    name: "${friendly_name} Data verversen"
+    on_press:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - script.execute: fetch_dashboard_data
+          else:
+            - script.execute: refresh_display
+  - platform: restart
+    name: "${friendly_name} Herstart"
+  - platform: factory_reset
+    name: "${friendly_name} Fabrieksreset"
+  - platform: template
+    name: "${friendly_name} Slaap nu"
+    on_press:
+      - deep_sleep.allow: battery_sleep
+      - max17043.sleep_mode: battery_gauge
+      - deep_sleep.enter:
+          id: battery_sleep
+          sleep_duration: !lambda |-
+            auto now = id(ntp_time).now();
+            const uint32_t quarter_seconds = 15 * 60;
+            if (!now.is_valid()) {
+              ESP_LOGW("main", "Geen geldige tijd voor kwartierslaap, val terug op 15 minuten");
+              return quarter_seconds * 1000;
+            }
+            uint32_t elapsed_in_quarter = (now.minute % 15) * 60 + now.second;
+            uint32_t remaining_seconds = quarter_seconds - elapsed_in_quarter;
+            if (remaining_seconds == 0) {
+              remaining_seconds = quarter_seconds;
+            }
+            ESP_LOGI("main", "Slaap %u seconden tot volgend kwartier", remaining_seconds);
+            return remaining_seconds * 1000;
+
+display:
+  - platform: waveshare_epaper
+    id: main_display
+    model: ${display_model}
+    cs_pin: ${pin_cs}
+    dc_pin: ${pin_dc}
+    reset_pin: ${pin_reset}
+    reset_duration: 2ms
+    busy_pin:
+      number: ${pin_busy}
+      inverted: true
+    update_interval: never
+    rotation: 0
+    lambda: |-
+      const auto bg = Color(255, 255, 255);
+      const auto fg = Color(0, 0, 0);
+      const auto line_soft = Color(220, 220, 220);
+      const auto line_mid = Color(186, 186, 186);
+      const auto muted = Color(132, 132, 132);
+      const auto dark_muted = Color(96, 96, 96);
+
+      auto safe_text = [](const std::string &value) -> std::string {
+        if (value.empty() || value == "unknown" || value == "unavailable" || value == "None") {
+          return "--";
+        }
+        return value;
+      };
+
+      auto weather_label = [&](const std::string &value) -> std::string {
+        if (value == "clear-night") return "Heldere nacht";
+        if (value == "cloudy") return "Bewolkt";
+        if (value == "fog") return "Mist";
+        if (value == "hail") return "Hagel";
+        if (value == "lightning") return "Onweer";
+        if (value == "lightning-rainy") return "Onweer en regen";
+        if (value == "partlycloudy") return "Half bewolkt";
+        if (value == "pouring") return "Plensregen";
+        if (value == "rainy") return "Regen";
+        if (value == "snowy") return "Sneeuw";
+        if (value == "snowy-rainy") return "Sneeuw en regen";
+        if (value == "sunny") return "Zonnig";
+        if (value == "windy") return "Winderig";
+        if (value == "windy-variant") return "Wisselvallig";
+        if (value == "exceptional") return "Onbekend";
+        return safe_text(value);
+      };
+
+      auto fmt1 = [](float value, const char *suffix) -> std::string {
+        if (std::isnan(value)) return std::string("--");
+        char buffer[24];
+        snprintf(buffer, sizeof(buffer), "%.1f%s", value, suffix);
+        return std::string(buffer);
+      };
+
+      auto fmt0 = [](float value, const char *suffix) -> std::string {
+        if (std::isnan(value)) return std::string("--");
+        char buffer[24];
+        snprintf(buffer, sizeof(buffer), "%.0f%s", value, suffix);
+        return std::string(buffer);
+      };
+
+      auto lights_tile_label = [](float value) -> std::string {
+        if (std::isnan(value)) return std::string("--");
+        int count = static_cast<int>(lroundf(value));
+        if (count < 0) count = 0;
+        char buffer[24];
+        snprintf(buffer, sizeof(buffer), "%d aan", count);
+        return std::string(buffer);
+      };
+
+      auto gate_label = [](const std::string &value) -> std::string {
+        if (value.empty() || value == "unknown" || value == "unavailable") return std::string("--");
+        if (value == "on") return std::string("Open");
+        if (value == "off") return std::string("Gesloten");
+        return std::string("--");
+      };
+
+      auto battery_percent = [](float value) -> int {
+        if (std::isnan(value)) return -1;
+        int rounded = static_cast<int>(lroundf(value));
+        if (rounded < 0) return 0;
+        if (rounded > 100) return 100;
+        return rounded;
+      };
+
+      auto wrap_text = [](const std::string &input, size_t max_chars_per_line, size_t max_lines) -> std::vector<std::string> {
+        std::vector<std::string> lines;
+        std::string clean;
+        clean.reserve(input.size());
+        bool previous_was_space = false;
+        for (char c : input) {
+          bool is_space = c == ' ' || c == '\n' || c == '\r' || c == '\t';
+          if (is_space) {
+            if (!clean.empty() && !previous_was_space) {
+              clean.push_back(' ');
+            }
+            previous_was_space = true;
+          } else {
+            clean.push_back(c);
+            previous_was_space = false;
+          }
+        }
+        while (!clean.empty() && clean.back() == ' ') clean.pop_back();
+        if (clean.empty()) {
+          lines.push_back("--");
+          return lines;
+        }
+
+        std::string current;
+        size_t start = 0;
+        while (start < clean.size() && lines.size() < max_lines) {
+          size_t end = clean.find(' ', start);
+          std::string word = clean.substr(start, end == std::string::npos ? std::string::npos : end - start);
+          if (word.size() > max_chars_per_line) {
+            if (!current.empty()) {
+              lines.push_back(current);
+              current.clear();
+              if (lines.size() >= max_lines) break;
+            }
+            lines.push_back(word.substr(0, max_chars_per_line));
+            if (lines.size() >= max_lines) break;
+          } else if (current.empty()) {
+            current = word;
+          } else if (current.size() + 1 + word.size() <= max_chars_per_line) {
+            current += " ";
+            current += word;
+          } else {
+            lines.push_back(current);
+            current = word;
+            if (lines.size() >= max_lines) break;
+          }
+          if (end == std::string::npos) {
+            start = clean.size();
+          } else {
+            start = end + 1;
+          }
+        }
+
+        if (!current.empty() && lines.size() < max_lines) {
+          lines.push_back(current);
+        }
+
+        if (start < clean.size() && !lines.empty()) {
+          std::string &last = lines.back();
+          if (last.size() > max_chars_per_line - 3) {
+            last = last.substr(0, max_chars_per_line - 3);
+          }
+          last += "...";
+        }
+
+        if (lines.empty()) {
+          lines.push_back("--");
+        }
+        return lines;
+      };
+
+      if (id(loading_screen_active)) {
+        it.fill(bg);
+        it.rectangle(16, 16, 768, 448, fg);
+        it.line(34, 76, 766, 76, line_soft);
+        it.print(34, 30, id(font_label), dark_muted, "Even opstarten");
+        it.print(34, 110, id(font_medium), fg, "Sorry papa...");
+        it.print(34, 154, id(font_small), fg, "Voor een Threadripper en een RTX 5090");
+        it.print(34, 182, id(font_small), fg, "was het cadeau-budget net niet groot genoeg.");
+        it.print(34, 236, id(font_medium), fg, "Dus kreeg je iets stiller:");
+        it.print(34, 276, id(font_large), fg, "jouw eigen dashboard.");
+
+        if (id(wifi_main).is_connected()) {
+          it.print(34, 356, id(font_small), muted, "Wifi hangt eraan, Home Assistant data komt binnen.");
+        } else if (id(wifi_main).is_ap_active()) {
+          it.print(34, 356, id(font_small), muted, "Nog geen wifi: ik toon zo meteen de setup-QR.");
+        } else {
+          it.print(34, 356, id(font_small), muted, "Even geduld, ik zoek wifi. Zo niet, toon ik de setup-QR.");
+        }
+
+        it.line(34, 408, 766, 408, line_soft);
+        it.print(34, 420, id(font_small), muted, "PS: dit verbruikt minder stroom dan die 5090.");
+        return;
+      }
+
+      if (!id(wifi_main).is_connected() && !id(wifi_setup_screen_active) && !id(wifi_main).is_ap_active()) {
+        return;
+      }
+
+      if (id(wifi_setup_screen_active) || id(wifi_main).is_ap_active()) {
+        it.fill(bg);
+        it.rectangle(16, 16, 768, 448, fg);
+        it.line(34, 76, 766, 76, line_soft);
+        it.line(400, 120, 400, 464, line_mid);
+        it.print(34, 30, id(font_medium), fg, "WIFI INSTELLEN");
+        it.print(34, 92, id(font_small), fg, "Het dashboard is niet verbonden met wifi.");
+        it.print(34, 118, id(font_small), fg, "1. Scan de linker QR om met de setup-hotspot te verbinden.");
+        it.print(34, 144, id(font_small), fg, "2. De captive portal opent meestal vanzelf.");
+        it.print(34, 170, id(font_small), fg, "3. Zo niet, scan de rechter QR of ga naar 192.168.4.1.");
+
+        it.print(34, 202, id(font_label), dark_muted, "Setup wifi");
+        it.qr_code(34, 242, id(setup_wifi_qr), fg, 4);
+        it.print(34, 386, id(font_small), fg, "SSID:");
+        it.printf(90, 386, id(font_small), fg, TextAlign::TOP_LEFT, "%s", "${fallback_ap_ssid}");
+        it.print(34, 414, id(font_small), fg, "Passwoord:");
+        it.printf(150, 414, id(font_small), fg, TextAlign::TOP_LEFT, "%s", "${fallback_ap_password}");
+
+        it.print(432, 202, id(font_label), dark_muted, "Open portal");
+        it.qr_code(432, 242, id(setup_portal_qr), fg, 4);
+        it.print(432, 386, id(font_small), fg, "URL:");
+        it.printf(490, 386, id(font_small), fg, TextAlign::TOP_LEFT, "%s", "${fallback_portal_url}");
+        it.print(432, 414, id(font_small), muted, "Gebruik dit als je gsm de portal niet toont.");
+        return;
+      }
+
+      it.fill(bg);
+
+      const int top_split = 128;
+      const int bottom_split = 336;
+
+      it.rectangle(16, 16, 768, 448, fg);
+      it.line(16, top_split, 784, top_split, line_mid);
+      it.line(390, top_split, 390, 464, line_mid);
+      it.line(584, top_split, 584, 464, line_mid);
+      it.line(16, bottom_split, 784, bottom_split, line_mid);
+      it.print(34, 28, id(font_label), dark_muted, "MANNENBASTION DASHBOARD");
+
+      auto now = id(ntp_time).now();
+      if (now.is_valid()) {
+        time_t snapped_epoch = now.timestamp - now.second - ((now.minute % 15) * 60);
+        auto snapped_now = esphome::ESPTime::from_epoch_local(snapped_epoch);
+        it.strftime(34, 48, id(font_time), fg, TextAlign::TOP_LEFT, "%H:%M", snapped_now);
+        it.print(620, 56, id(font_icon_meta), muted, "\U0000F073");
+        it.strftime(764, 54, id(font_small), muted, TextAlign::TOP_RIGHT, "%d/%m/%Y", snapped_now);
+      } else {
+        it.print(34, 48, id(font_time), fg, "00:00");
+        it.print(620, 56, id(font_icon_meta), muted, "\U0000F073");
+        it.print(764, 54, id(font_small), muted, TextAlign::TOP_RIGHT, "--/--/----");
+      }
+
+      int battery_pct = battery_percent(id(battery_level).state);
+      const int header_battery_x = 680;
+      const int header_battery_y = 28;
+      const int header_battery_w = 28;
+      const int header_battery_h = 14;
+      it.rectangle(header_battery_x, header_battery_y, header_battery_w, header_battery_h, dark_muted);
+      it.filled_rectangle(header_battery_x + header_battery_w, header_battery_y + 4, 4, 6, dark_muted);
+      if (battery_pct >= 0) {
+        int inner_w = static_cast<int>(lroundf((header_battery_w - 4) * (battery_pct / 100.0f)));
+        if (inner_w > 0) {
+          it.filled_rectangle(header_battery_x + 2, header_battery_y + 2, inner_w, header_battery_h - 4, fg);
+        }
+        it.printf(764, 24, id(font_label), dark_muted, TextAlign::TOP_RIGHT, "%d%%", battery_pct);
+      } else {
+        it.print(764, 24, id(font_label), dark_muted, TextAlign::TOP_RIGHT, "--%");
+      }
+
+      it.print(34, 138, id(font_icon_label), dark_muted, "\U0000F0C2");
+      it.print(60, 138, id(font_label), dark_muted, "WEER");
+      it.line(134, 148, 360, 148, line_soft);
+      it.printf(34, 170, id(font_large), fg, TextAlign::TOP_LEFT, "%s", fmt1(id(weather_temp).state, "°C").c_str());
+      it.printf(34, 226, id(font_medium), dark_muted, TextAlign::TOP_LEFT, "%s", weather_label(id(weather_text).state).c_str());
+
+      it.print(34, 350, id(font_label), dark_muted, "FEITJE VAN DE DAG");
+      it.line(200, 360, 360, 360, line_soft);
+      {
+        std::string fact_text = safe_text(id(fact_text_cache));
+        int fact_y = 382;
+        auto fact_lines = wrap_text(fact_text, 40, 4);
+        for (size_t i = 0; i < fact_lines.size(); i++) {
+          it.print(34, fact_y + static_cast<int>(i) * 16, id(font_fact), i == 0 ? fg : dark_muted, fact_lines[i].c_str());
+        }
+      }
+
+      it.print(408, 138, id(font_icon_label), dark_muted, "\U0000F2C9");
+      it.print(434, 138, id(font_label), dark_muted, "${room_label}");
+      it.line(510, 148, 554, 148, line_soft);
+      it.printf(408, 172, id(font_large), fg, TextAlign::TOP_LEFT, "%s", fmt1(id(living_temp).state, "°C").c_str());
+      it.printf(408, 228, id(font_medium), fg, TextAlign::TOP_LEFT, "%s", fmt0(id(living_humidity).state, "%").c_str());
+      it.print(408, 268, id(font_icon_meta), muted, "\U0000F043");
+      it.print(430, 268, id(font_small), muted, "luchtvochtigheid");
+
+      it.print(408, 350, id(font_icon_label), dark_muted, "\U0000F52B");
+      it.print(434, 350, id(font_label), dark_muted, "POORT");
+      it.line(500, 360, 554, 360, line_soft);
+      it.printf(408, 388, id(font_medium), fg, TextAlign::TOP_LEFT, "%s", gate_label(id(gate_state).state).c_str());
+
+      it.print(602, 138, id(font_icon_label), dark_muted, "\U0000F0E7");
+      it.print(628, 138, id(font_label), dark_muted, "ENERGIE");
+      it.line(708, 148, 754, 148, line_soft);
+      it.print(602, 168, id(font_icon_meta), muted, "\U0000F0E7");
+      it.print(624, 168, id(font_small), muted, "verbruik nu");
+      it.printf(760, 198, id(font_large), fg, TextAlign::TOP_RIGHT, "%s", fmt0(id(power_now).state, " W").c_str());
+      it.print(602, 258, id(font_icon_meta), muted, "\U0000F185");
+      it.print(624, 258, id(font_small), muted, "zon nu");
+      it.printf(760, 288, id(font_large), fg, TextAlign::TOP_RIGHT, "%s", fmt0(id(solar_now).state, " W").c_str());
+
+      it.print(602, 350, id(font_icon_label), dark_muted, "\U0000F0EB");
+      it.print(628, 350, id(font_label), dark_muted, "LICHTEN");
+      it.line(706, 360, 754, 360, line_soft);
+      it.printf(602, 388, id(font_medium), fg, TextAlign::TOP_LEFT, "%s", lights_tile_label(id(lights_on).state).c_str());
+
+deep_sleep:
+  id: battery_sleep
+  run_duration: 10min
+  sleep_duration: 15min
